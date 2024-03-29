@@ -1,0 +1,543 @@
+//CONECTION PARAMETERS
+
+// Server
+"adobe-bizible_prod.snowflakecomputing.com" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+// Schema
+"MARKETOSTAGE" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+// Warehouse
+"analysis" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+//REPORT PARAMETERS
+
+// Server
+"adobe-bizible_prod.snowflakecomputing.com" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+// Warehouse
+"analysis" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+// Schema
+"MARKETOSTAGE" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+// OC Rank
+let
+    //this query returns the rank value of the Opportunity Creation stage.  it is used to determine which stages come after the OC stage.
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="STAGE_DEFINITIONS"]}[Data],
+    #"Filtered Rows" = Table.SelectRows(Source, each ([_DELETED_DATE] = null) and ([ID] = "_bizible_OC")),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "IS_INACTIVE", "IS_IN_CUSTOM_MODEL", "IS_BOOMERANG", "IS_FROM_SALESFORCE", "IS_DELETED", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "IS_TRANSITION_TRACKING", "STAGE_STATUS", "IS_DEFAULT", "STAGE_NAME", "ID"})
+in
+    #"Removed Columns"
+
+// Filter Date
+let
+    //this table creates two dates, one for 5 years ago and one for 2 years ago.  it is used to filter other tables in the data model.
+    Source = Date.From(Date.AddYears(DateTime.LocalNow(),-5)),
+    #"Converted to Table" = #table(1, {{Source}}),
+    #"Added Custom" = Table.AddColumn(#"Converted to Table", "Custom2", each Date.From(Date.AddYears(DateTime.LocalNow(),-2))),
+    #"Renamed Columns" = Table.RenameColumns(#"Added Custom",{{"Column1", "Five years ago"}, {"Custom2", "Two years ago"}}),
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Five years ago", type date}, {"Two years ago", type date}})
+in
+    #"Changed Type"
+
+// Corporate Currency
+let
+    //this table pulls all available currencies in.  it is filtered by the embed code to return only one value, the corporate (aka default) currency code for the tenant.
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="CURRENCIES"]}[Data],
+    #"Filtered Rows" = Table.SelectRows(Source, each ([_DELETED_DATE] = null)),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"ID", "IS_CORPORATE", "IS_ENABLED", "MODIFIED_DATE", "MODIFIED_DATE_CRM", "CREATED_DATE", "CREATED_DATE_CRM", "ISO_NUMERIC", "EXPONENT", "NAME", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ISO_CODE", "Currency"}})
+in
+    #"Renamed Columns"
+
+// User Selected Currency
+let
+    //this table pulls all available currencies in.  it is filtered by the embed code to return only one value, the currency code selected by the user in their Marketo Measure user settings.
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="CURRENCIES"]}[Data],
+    #"Filtered Rows" = Table.SelectRows(Source, each ([_DELETED_DATE] = null)),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"ID", "IS_CORPORATE", "IS_ENABLED", "MODIFIED_DATE", "MODIFIED_DATE_CRM", "CREATED_DATE", "CREATED_DATE_CRM", "ISO_NUMERIC", "EXPONENT", "NAME", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ISO_CODE", "Currency"}})
+in
+    #"Renamed Columns"
+
+// Default Object
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data],
+    //this query produces a table which is filtered by the UI to the default object for the customer
+    #"Custom Query" = Value.NativeQuery(Source, "select * from values('Lead'),('Contact')",null,[EnableFolding=true]),
+    #"Renamed Columns" = Table.RenameColumns(#"Custom Query",{{"COLUMN1", "Object"}})
+in
+    #"Renamed Columns"
+
+// Attribution Model
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data],
+    //this query produces a table which allows the user to choose which attribution model they want to report on
+    #"Custom Query" = Value.NativeQuery(Source, "select * from values('First touch',1),('Lead creation',2),('U shape',3),('W shape',4),('Full path',5),('Custom',6)",null,[EnableFolding=true]),
+    #"Renamed Columns" = Table.RenameColumns(#"Custom Query",{{"COLUMN1", "Attribution model"},{"COLUMN2","Code"}})
+in
+    #"Renamed Columns"
+
+// Attribution AI Type
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data],
+    //this query produces a table which allows the customer to choose between AAI types
+    #"Custom Query" = Value.NativeQuery(Source, "select * from values(7,'Incremental'),(8,'Influenced')",null,[EnableFolding=true]),
+    #"Renamed Columns" = Table.RenameColumns(#"Custom Query",{{"COLUMN1", "Code"},{"COLUMN2","AI attribution type"}})
+in
+    #"Renamed Columns"
+    
+//SNOWFLAKE TABLES
+
+// Server
+"adobe-bizible_prod.snowflakecomputing.com" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+// Warehouse
+"analysis" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+// Schema
+"MARKETOSTAGE" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+// Account
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="ACCOUNTS"]}[Data],
+    //filter to remove deleted rows
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "WEB_SITE", "ENGAGEMENT_RATING", "ENGAGEMENT_SCORE", "DOMAIN", "IS_DELETED", "CUSTOM_PROPERTIES", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "SOURCE_ID"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Account id"}, {"CREATED_DATE", "Account created date"}, {"NAME", "Account name"}}),
+    //change date from datetime to date
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Account created date", type date}}) 
+in
+    #"Changed Type"
+
+// User Touchpoint
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="USER_TOUCHPOINTS"]}[Data],
+    //filter out deleted rows and any touchpoints older than 5 years ago
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [TOUCHPOINT_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Five years ago")))),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "IS_FIRST_KNOWN_TOUCH", "VISITOR_ID", "BROWSER_NAME", "BROWSER_VERSION", "PLATFORM_NAME", "PLATFORM_VERSION", "LANDING_PAGE", "LANDING_PAGE_RAW", "REFERRER_PAGE", "REFERRER_PAGE_RAW", "FORM_PAGE", "FORM_PAGE_RAW", "FORM_DATE", "CITY", "REGION", "COUNTRY", "SEARCH_PHRASE", "AD_PROVIDER", "ACCOUNT_UNIQUE_ID", "ACCOUNT_NAME", "ADVERTISER_UNIQUE_ID", "ADVERTISER_NAME", "SITE_UNIQUE_ID", "SITE_NAME", "PLACEMENT_UNIQUE_ID", "PLACEMENT_NAME", "CAMPAIGN_NAME", "AD_GROUP_UNIQUE_ID", "AD_GROUP_NAME", "AD_UNIQUE_ID", "AD_NAME", "CREATIVE_UNIQUE_ID", "CREATIVE_NAME", "CREATIVE_DESCRIPTION_1", "CREATIVE_DESCRIPTION_2", "CREATIVE_DESTINATION_URL", "CREATIVE_DISPLAY_URL", "KEYWORD_UNIQUE_ID", "KEYWORD_NAME", "KEYWORD_MATCH_TYPE", "IS_FORM_SUBMISSION_TOUCH", "IS_IMPRESSION_TOUCH", "IS_DELETED", "ROW_KEY", "LANDING_PAGE_KEY", "REFERRER_PAGE_KEY", "FORM_PAGE_KEY", "ACCOUNT_ROW_KEY", "ADVERTISER_ROW_KEY", "SITE_ROW_KEY", "PLACEMENT_ROW_KEY", "AD_ROW_KEY", "AD_GROUP_ROW_KEY", "CREATIVE_ROW_KEY", "KEYWORD_ROW_KEY", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "IMPRESSION_ID"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "User touchpoint id"}, {"EMAIL", "Email"}, {"SESSION_ID", "Session id"}, {"CAMPAIGN_MEMBER_ID", "Campaign member id"}, {"CRM_EVENT_ID", "Event id"}, {"CRM_TASK_ID", "Task id"}, {"TOUCHPOINT_DATE", "Touchpoint date"}, {"MARKETING_TOUCH_TYPE", "Marketing touch type"}, {"CHANNEL", "Channel id"}, {"MEDIUM", "Medium"}, {"WEB_SOURCE", "Web source"}, {"CAMPAIGN_UNIQUE_ID", "Campaign id"}, {"CRM_ACTIVITY_ID", "Activity id"}, {"CAMPAIGN_ROW_KEY", "Join campaign id"}}),
+    //change touchpoint date from datetime to type date
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Touchpoint date", type date}}),
+    //lowercase the email address
+    #"Lowercased Text" = Table.TransformColumns(#"Changed Type",{{"Email", Text.Lower, type text}})
+in
+    #"Lowercased Text"
+
+// Filter Date
+let
+    //this table creates two dates, one for 5 years ago and one for 2 years ago.  it is used to filter other tables in the data model.
+    Source = Date.From(Date.AddYears(DateTime.LocalNow(),-5)),
+    #"Converted to Table" = #table(1, {{Source}}),
+    #"Added Custom" = Table.AddColumn(#"Converted to Table", "Custom2", each Date.From(Date.AddYears(DateTime.LocalNow(),-2))),
+    #"Renamed Columns" = Table.RenameColumns(#"Added Custom",{{"Column1", "Five years ago"}, {"Custom2", "Two years ago"}}),
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Five years ago", type date}, {"Two years ago", type date}})
+in
+    #"Changed Type"
+
+// Buyer Attribution Touchpoint
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="ATTRIBUTION_TOUCHPOINTS"]}[Data],
+    //filter to out deleted rows and touchpoints older than 5 years
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [TOUCHPOINT_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Five years ago")))),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "VISITOR_ID", "MARKETING_TOUCH_TYPE",  "CATEGORY11", "CATEGORY12", "CATEGORY13", "CATEGORY14", "CATEGORY15", "BROWSER_NAME", "BROWSER_VERSION", "PLATFORM_NAME", "PLATFORM_VERSION", "LANDING_PAGE", "LANDING_PAGE_RAW", "REFERRER_PAGE", "REFERRER_PAGE_RAW", "FORM_PAGE", "FORM_PAGE_RAW", "FORM_DATE", "CITY", "REGION", "COUNTRY", "MEDIUM", "WEB_SOURCE", "SEARCH_PHRASE", "AD_PROVIDER", "ACCOUNT_UNIQUE_ID", "ACCOUNT_NAME", "ADVERTISER_UNIQUE_ID", "ADVERTISER_NAME", "SITE_UNIQUE_ID", "SITE_NAME", "PLACEMENT_UNIQUE_ID", "PLACEMENT_NAME", "CAMPAIGN_NAME", "AD_GROUP_UNIQUE_ID", "AD_GROUP_NAME", "AD_UNIQUE_ID", "AD_NAME", "CREATIVE_UNIQUE_ID", "CREATIVE_NAME", "CREATIVE_DESCRIPTION_1", "CREATIVE_DESCRIPTION_2", "CREATIVE_DESTINATION_URL", "CREATIVE_DISPLAY_URL", "KEYWORD_UNIQUE_ID", "KEYWORD_NAME", "KEYWORD_MATCH_TYPE", "IS_FIRST_TOUCH", "IS_LEAD_CREATION_TOUCH", "IS_OPP_CREATION_TOUCH", "IS_CLOSED_TOUCH", "STAGES_TOUCHED", "IS_FORM_SUBMISSION_TOUCH", "IS_IMPRESSION_TOUCH", "IS_DELETED", "ROW_KEY", "OPPORTUNITY_ROW_KEY", "LANDING_PAGE_KEY", "REFERRER_PAGE_KEY", "FORM_PAGE_KEY", "ACCOUNT_ROW_KEY", "ADVERTISER_ROW_KEY", "SITE_ROW_KEY", "PLACEMENT_ROW_KEY", "CAMPAIGN_ROW_KEY", "AD_ROW_KEY", "AD_GROUP_ROW_KEY", "CREATIVE_ROW_KEY", "KEYWORD_ROW_KEY", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "EMAIL"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Buyer attribution touchpoint id"}, {"OPPORTUNITY_ID", "Opportunity id"}, {"CONTACT_ID", "Contact id"}, {"ACCOUNT_ID", "Account id"}, {"FIRST_CLICK_PERCENTAGE", "First touch percent"}, {"LAST_ANON_CLICK_PERCENTAGE", "Lead creation percent"}, {"U_SHAPE_PERCENTAGE", "U shape percent"}, {"W_SHAPE_PERCENTAGE", "W shape percent"}, {"FULL_PATH_PERCENTAGE", "Full path percent"}, {"CUSTOM_MODEL_PERCENTAGE", "Custom percent"}, {"USER_TOUCHPOINT_ID", "User touchpoint id"}, {"CATEGORY1", "Category1"}, {"CATEGORY2", "Category2"}, {"CATEGORY3", "Category3"}, {"CATEGORY4", "Category4"}, {"CATEGORY5", "Category5"}, {"CATEGORY6", "Category6"}, {"CATEGORY7", "Category7"}, {"CATEGORY8", "Category8"}, {"CATEGORY9", "Category9"}, {"CATEGORY10", "Category10"}, {"TOUCHPOINT_DATE", "Touchpoint date"}, {"CHANNEL", "Channel id"}, {"CAMPAIGN_UNIQUE_ID", "Campaign Id"}}),
+    //change touchpoint date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Touchpoint date", type date}})
+in
+    #"Changed Type"
+
+// Opportunity
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="OPPORTUNITIES"]}[Data],
+    //filter out deleted rows and any opportunity with a close date longer than 2 years ago
+    #"Filtered Rows" = Table.SelectRows(Source, each ([_DELETED_DATE] = null and [CLOSE_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Two years ago"))))),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "ACCOUNT_ID", "BIZIBLE_CUSTOM_MODEL_DATE", "CONVERTED_FROM_LEAD_ID",  "PRIMARY_CONTACT_ID", "ODDS_OF_CONVERSION", "BIZIBLE_STAGE_PREVIOUS", "IS_DELETED", "ROW_KEY", "CUSTOM_PROPERTIES", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "SOURCE_ID"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"CLOSE_DATE", "Opportunity close date"}, {"ID", "Opportunity id"}, {"CREATED_DATE", "Opportunity created date"}, {"NAME", "Opportunity name"}, {"IS_WON", "Won"}, {"IS_CLOSED", "Closed"}, {"AMOUNT", "Opportunity amount"}, {"BIZIBLE_STAGE", "Current stage"}, {"CURRENCY_ISO_CODE", "Original opportunity currency"}, {"CURRENCY_ID", "Currency id"}}),
+    //change close and created dates from datetime to date type
+    //changed currency id to type text so it can be used to join with the currency id in the conversion rate table.  direct query mode does not support changing from text to number.  this should be fixed in Snowflake so that the currency id column in the daily conversion rate table is stored as type number.
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Opportunity close date", type date}, {"Opportunity created date", type date}, {"Currency id", type text}})
+in
+    #"Changed Type"
+
+// Buyer Touchpoint
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="TOUCHPOINTS"]}[Data],
+    //filter out delted rows and touchpoints older than 5 years
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [TOUCHPOINT_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Five years ago")))),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "EMAIL", "UNIQUE_ID_PERSON", "CATEGORY11", "CATEGORY12", "CATEGORY13", "CATEGORY14", "CATEGORY15", "BROWSER_NAME", "BROWSER_VERSION", "PLATFORM_NAME", "PLATFORM_VERSION", "LANDING_PAGE", "LANDING_PAGE_RAW", "REFERRER_PAGE", "REFERRER_PAGE_RAW", "FORM_PAGE", "FORM_PAGE_RAW", "FORM_DATE", "CITY", "REGION", "COUNTRY", "MEDIUM", "WEB_SOURCE", "SEARCH_PHRASE", "AD_PROVIDER", "ACCOUNT_UNIQUE_ID", "ACCOUNT_NAME", "ADVERTISER_UNIQUE_ID", "ADVERTISER_NAME", "SITE_UNIQUE_ID", "SITE_NAME", "PLACEMENT_UNIQUE_ID", "PLACEMENT_NAME", "CAMPAIGN_NAME", "AD_GROUP_UNIQUE_ID", "AD_GROUP_NAME", "AD_UNIQUE_ID", "AD_NAME", "CREATIVE_UNIQUE_ID", "CREATIVE_NAME", "CREATIVE_DESCRIPTION_1", "CREATIVE_DESCRIPTION_2", "CREATIVE_DESTINATION_URL", "CREATIVE_DISPLAY_URL", "KEYWORD_UNIQUE_ID", "KEYWORD_NAME", "KEYWORD_MATCH_TYPE", "IS_FIRST_TOUCH", "IS_OPP_CREATION_TOUCH", "IS_CLOSED_TOUCH", "STAGES_TOUCHED", "IS_IMPRESSION_TOUCH", "IS_DELETED", "ROW_KEY", "CONTACT_ROW_KEY", "LEAD_ROW_KEY", "LANDING_PAGE_KEY", "REFERRER_PAGE_KEY", "ACCOUNT_ROW_KEY", "ADVERTISER_ROW_KEY", "SITE_ROW_KEY", "PLACEMENT_ROW_KEY", "CAMPAIGN_ROW_KEY", "AD_ROW_KEY", "AD_GROUP_ROW_KEY", "CREATIVE_ROW_KEY", "KEYWORD_ROW_KEY", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Buyer touchpoint id"}, {"CONTACT_ID", "Contact id"}, {"ACCOUNT_ID", "Account id"}, {"LEAD_ID", "Lead id"}, {"USER_TOUCHPOINT_ID", "User touchpoint id"}, {"VISITOR_ID", "Visitor id"},{"CATEGORY1", "Category1"}, {"CATEGORY2", "Category2"}, {"CATEGORY3", "Category3"}, {"CATEGORY4", "Category4"}, {"CATEGORY5", "Category5"}, {"CATEGORY6", "Category6"}, {"CATEGORY7", "Category7"}, {"CATEGORY8", "Category8"}, {"CATEGORY9", "Category9"}, {"CATEGORY10", "Category10"}, {"FIRST_CLICK_PERCENTAGE", "First touch percent"}, {"LAST_ANON_CLICK_PERCENTAGE", "Lead creation percent"}, {"U_SHAPE_PERCENTAGE", "U shape percent"}, {"W_SHAPE_PERCENTAGE", "W shape percent"}, {"FULL_PATH_PERCENTAGE", "Full path percent"}, {"CUSTOM_MODEL_PERCENTAGE", "Custom percent"}, {"TOUCHPOINT_DATE", "Touchpoint date"}, {"IS_LEAD_CREATION_TOUCH", "Is lead creation"}, {"IS_FORM_SUBMISSION_TOUCH", "Is form submit"},{"FORM_PAGE_KEY","Form page id"},{"MARKETING_TOUCH_TYPE","Touch type"}, {"CHANNEL", "Channel id"}, {"CAMPAIGN_UNIQUE_ID", "Campaign id"}}),
+    //change touchpoint date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Touchpoint date", type date}})
+in
+    #"Changed Type"
+
+// Channel
+let
+    //issue a sql statement to return the id value and split the channel and subchannel into separate columns
+    Source = Value.NativeQuery(Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data], "Select id, split_part(name,'.',1)   as channel, split_part(name,'.',2)   as subchannel  From "&Schema&".CHANNELS Where _DELETED_DATE is null and ID is not null", null, [EnableFolding=true]),
+    #"Renamed Columns" = Table.RenameColumns(Source,{{"ID", "Channel id"}, {"CHANNEL", "Channel"}, {"SUBCHANNEL", "Subchannel"}})
+in
+    #"Renamed Columns"
+
+// Contact
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="CONTACTS"]}[Data],
+    //filter out deleted rows and duplicates
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [IS_DUPLICATE] = false),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "LEAD_SOURCE", "BIZIBLE_STAGE_PREVIOUS", "ODDS_OF_CONVERSION", "BIZIBLE_COOKIE_ID", "IS_DELETED", "IS_DUPLICATE", "SOURCE_SYSTEM", "OTHER_SYSTEM_ID", "CUSTOM_PROPERTIES", "ROW_KEY", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "SOURCE_ID"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Contact id"}, {"CREATED_DATE", "Contact created date"}, {"EMAIL", "Email"}, {"BIZIBLE_STAGE", "Current stage"}, {"ACCOUNTID", "Account id"}}),
+    //change created date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Contact created date", type date}}),
+    //change email to lower case
+    #"Lowercased Text" = Table.TransformColumns(#"Changed Type",{{"Email", Text.Lower, type text}})
+in
+    #"Lowercased Text"
+
+// Lead
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="LEADS"]}[Data],
+    //filter out deleted rows and duplicates
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [IS_DUPLICATE] = false),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "WEB_SITE", "COMPANY", "LEAD_SOURCE", "CONVERTED_OPPORTUNITY_ID", "CONVERTED_CONTACT_ID", "ACCOUNTID", "BIZIBLE_STAGE_PREVIOUS", "ODDS_OF_CONVERSION", "LEAD_SCORE_MODEL", "LEAD_SCORE_RESULTS", "BIZIBLE_COOKIE_ID", "IS_DELETED", "SOURCE_SYSTEM", "OTHER_SYSTEM_ID", "CUSTOM_PROPERTIES", "ROW_KEY", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "SOURCE_ID","IS_DUPLICATE"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Lead id"}, {"CREATED_DATE", "Lead created date"}, {"IS_CONVERTED", "Converted"}, {"CONVERTED_DATE", "Converted date"}, {"BIZIBLE_STAGE", "Current stage"}, {"EMAIL", "Email"}}),
+    //change created date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Lead created date", type date}, {"Converted date", type date}}),
+    //change email to lower case
+    #"Lowercased Text" = Table.TransformColumns(#"Changed Type",{{"Email", Text.Lower, type text}})
+in
+    #"Lowercased Text"
+
+// Activity
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="ACTIVITIES"]}[Data],
+    //filter out deleted rows and any activities older than 5 years
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [START_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Five years ago")))),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"LEAD_ID", "CONTACT_ID", "ACTIVITY_TYPE_ID", "CAMPAIGN_ID", "SOURCE_SYSTEM", "CREATED_DATE", "MODIFIED_DATE", "IS_DELETED", "AD_FORM_ID", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "SOURCE_ID", "CUSTOM_PROPERTIES"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Activity id"}, {"ACTIVITY_TYPE_NAME", "Activity name"}, {"START_DATE", "Activity start date"}, {"END_DATE", "Activity end date"}}),
+    //change start and end dates from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Activity start date", type date}, {"Activity end date", type date}})
+in
+    #"Changed Type"
+
+// Campaign
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="AD_CAMPAIGNS"]}[Data],
+    //filter out deleted rows and rows with no ID value
+    #"Filtered Rows" = Table.SelectRows(Source, each ([_DELETED_DATE] = null and [ID] <> null)),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"DISPLAY_ID", "AD_ACCOUNT_UNIQUE_ID", "AD_ACCOUNT_NAME", "ADVERTISER_UNIQUE_ID", "ADVERTISER_NAME", "AD_GROUP_UNIQUE_ID", "AD_GROUP_NAME", "AD_CAMPAIGN_UNIQUE_ID", "AD_CAMPAIGN_NAME", "IS_ACTIVE", "IS_DELETED", "MODIFIED_DATE", "FIRST_IMPORTED", "NEEDS_UPDATE", "GROUPING_KEY", "ENTITY_TYPE", "DAILY_BUDGET", "TRACKING_URL_TEMPLATE", "TRACKING_URL_TEMPLATE_OLD", "TRACKING_URL_TEMPLATE_REQUESTED", "TRACKING_URL_TEMPLATE_APPLIED", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "SOURCE_ID"}),
+    //the row key is pulled in here and used for joining to other tables in the data model.  this is because the campaign id is case sensitive to obtain uniqueness, and the modeling engine in Power BI is not case sensitive
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Campaign id"}, {"NAME", "Campaign name"}, {"PROVIDER_TYPE", "Provider type"}, {"ROW_KEY", "Join campaign id"}})
+in
+    #"Renamed Columns"
+
+// Campaign Member
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="CAMPAIGN_MEMBERS"]}[Data],
+    //filter out deleted rows and any campaign members created more than 5 years ago
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [CREATED_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Five years ago")))),
+    #"Removed Other Columns" = Table.SelectColumns(#"Filtered Rows",{"ID", "HAS_RESPONDED", "FIRST_RESPONDED_DATE"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Other Columns",{{"ID", "Campaign member id"}, {"HAS_RESPONDED", "Responded"}, {"FIRST_RESPONDED_DATE", "First responded date"}}),
+    //change responded date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"First responded date", type date}})
+in
+    #"Changed Type"
+
+// Cost
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="COSTS"]}[Data],
+    //filter out deleted rows and any costs incurred more than 2 years ago.  if the cost is a self-reported cost, only include the rows with the channel is aggregatable flag is true, for all other costs, the only include rows where the campaign is aggregatable flag is true.
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [COST_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Two years ago"))) and (([AD_PROVIDER] <> "SelfReported" and [CAMPAIGN_IS_AGGREGATABLE_COST] = true) or ([AD_PROVIDER] = "SelfReported" and [CHANNEL_IS_AGGREGATABLE_COST] = true))),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "SOURCE", "CLICKS", "IMPRESSIONS", "ESTIMATED_TOTAL_POSSIBLE_IMPRESSIONS", "CHANNEL_NAME", "ADVERTISER_UNIQUE_ID", "ADVERTISER_NAME", "ADVERTISER_IS_AGGREGATABLE_COST", "ACCOUNT_UNIQUE_ID", "ACCOUNT_NAME", "ACCOUNT_IS_AGGREGATABLE_COST", "CAMPAIGN_NAME", "AD_GROUP_UNIQUE_ID", "AD_GROUP_NAME", "AD_GROUP_IS_AGGREGATABLE_COST", "AD_UNIQUE_ID", "AD_NAME", "AD_IS_AGGREGATABLE_COST", "CREATIVE_UNIQUE_ID", "CREATIVE_NAME", "CREATIVE_IS_AGGREGATABLE_COST", "KEYWORD_UNIQUE_ID", "KEYWORD_NAME", "KEYWORD_IS_AGGREGATABLE_COST", "PLACEMENT_UNIQUE_ID", "PLACEMENT_NAME", "PLACEMENT_IS_AGGREGATABLE_COST", "SITE_UNIQUE_ID", "SITE_NAME", "SITE_IS_AGGREGATABLE_COST", "IS_DELETED", "SOURCE_ID", "ROW_KEY", "ACCOUNT_ROW_KEY", "ADVERTISER_ROW_KEY", "SITE_ROW_KEY", "PLACEMENT_ROW_KEY", "AD_ROW_KEY", "AD_GROUP_ROW_KEY", "CREATIVE_ROW_KEY", "KEYWORD_ROW_KEY", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "CHANNEL_IS_AGGREGATABLE_COST", "CAMPAIGN_IS_AGGREGATABLE_COST"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Cost id"}, {"COST_DATE", "Cost date"}, {"COST_IN_MICRO", "Cost in micro"}, {"AD_PROVIDER", "Ad provider"}, {"CHANNEL_UNIQUE_ID", "Channel id"}, {"CAMPAIGN_UNIQUE_ID", "Campaign id"}, {"ISO_CURRENCY_CODE", "Original cost currency"}, {"CURRENCY_ID", "Currency id"},{"CAMPAIGN_ROW_KEY","Join campaign id"}}),
+    //change cost date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Cost date", type date}, {"Currency id", type text}})
+in
+    #"Changed Type"
+
+// Event
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="CRM_EVENTS"]}[Data],
+    //filter out deleted rows and events which started more than 5 years ago
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [EVENT_START_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Five years ago")))),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "LEAD_ID", "LEAD_EMAIL", "CONTACT_ID", "CONTACT_EMAIL", "BIZIBLE_COOKIE_ID", "IS_DELETED", "CUSTOM_PROPERTIES", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "CREATED_DATE", "SOURCE_ID"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Event id"}, {"ACTIVITY_TYPE", "Activity type"}, {"EVENT_START_DATE", "Activity start date"}, {"EVENT_END_DATE", "Activity end date"}}),
+    //change start and end date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Activity start date", type date}, {"Activity end date", type date}})
+in
+    #"Changed Type"
+
+// Task
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="CRM_TASKS"]}[Data],
+    //filter out deleted rows and any activities from more than 5 years ago
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [ACTIVITY_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Five years ago")))),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"CREATED_DATE", "MODIFIED_DATE", "LEAD_ID", "LEAD_EMAIL", "CONTACT_ID", "CONTACT_EMAIL", "BIZIBLE_COOKIE_ID", "IS_DELETED", "CUSTOM_PROPERTIES", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "SOURCE_ID"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Task id"}, {"ACTIVITY_TYPE", "Activity type"}, {"ACTIVITY_DATE", "Activity date"}}),
+    //change activity date from type datetime to date
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Activity date", type date}})
+in
+    #"Changed Type"
+
+// Opportunity Stage Transition
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data],
+    //use a custom query to get the datediff to work in direct query mode.  join to bat table is to use touchpoint date instead of transition date in opportunity velocity reporting.  join to opportunity table is to get closed date for deal velocity calculation.
+    #"Custom Query" = Value.NativeQuery(Source, "select ost.id
+      ,ost.touchpoint_id
+      ,ost.transition_date
+      ,ost.stage_id
+      ,ost.opportunity_id
+      ,ost.next_stage_date
+      ,iff(sd.rank < (select rank from "&Schema&".stage_definitions where id = '_bizible_OC'), bat.touchpoint_date, ost.transition_date)    as transition_in_velocity
+      ,ifnull(ost.next_stage_date,current_date())           as transition_out_velocity
+      ,iff(opp.is_closed = false or opp.is_won = true,iff(transition_in_velocity <= transition_out_velocity, datediff(day,transition_in_velocity,transition_out_velocity) + 1, null), null) as days_in_stage
+      ,datediff(day, iff(ost.stage_id = '_bizible_FT', transition_in_velocity, null), opp.close_date)  as days_to_close
+  from "&Schema&".opp_stage_transitions    ost
+       join
+       "&Schema&".attribution_touchpoints   bat
+        on bat.id               = ost.touchpoint_id
+       and bat._deleted_date    is null
+       left outer join
+       "&Schema&".stage_definitions   sd
+         on sd.id  = ost.stage_id
+        join
+        "&Schema&".opportunities      opp
+         on opp.id      = ost.opportunity_id
+        and opp._deleted_date is null
+ where  greatest(ost.transition_date,transition_in_velocity) >= dateadd(year,-5,current_date())
+   and ost._deleted_date is null
+   and ost.is_pending = false
+   and ost.is_non_transitional = false",null,[EnableFolding=true]),
+    #"Renamed Columns" = Table.RenameColumns(#"Custom Query",{{"ID", "Opportunity stage transition id"}, {"TOUCHPOINT_ID", "Buyer attribution touchpoint id"}, {"TRANSITION_DATE", "Transition in date"}, {"STAGE_ID", "Stage id"}, {"OPPORTUNITY_ID", "Opportunity id"}, {"NEXT_STAGE_DATE", "Transition out date"}, {"DAYS_IN_STAGE","Days in stage"}, {"TRANSITION_IN_VELOCITY", "Transition in velocity"}, {"TRANSITION_OUT_VELOCITY", "Transition out velocity"}, {"DAYS_TO_CLOSE", "Days to close"}}),
+    //change transition in and out dates from datetime to date types
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Transition in date", type date}, {"Transition out date", type date},{"Transition in velocity", type date}, {"Transition out velocity", type date}})
+in
+    #"Changed Type"
+
+// Lead/Contact Stage Transition
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data],
+    //use a custom query to get the datediff to work in direct query mode
+    //not happy about the explicit date filter here, but didn't have time to figure out how to get the parameter value to work in the native query.  to do some day to replace it so it references the shared parameter value.
+    #"Custom Query" = Value.NativeQuery(Source, "Select id, touchpoint_id, transition_date, stage_id, lead_id, contact_id, next_stage_date, iff(transition_date <= next_stage_date, datediff(day,transition_date,ifnull(next_stage_date,current_date())) + 1, null) as days_in_stage from "&Schema&".LEAD_STAGE_TRANSITIONS where _deleted_date is null and transition_date >= dateadd(year,-5,current_date()) and is_pending = false and is_non_transitional = false",null,[EnableFolding=true]),
+    #"Renamed Columns" = Table.RenameColumns(#"Custom Query",{{"ID", "Stage transition id"}, {"TOUCHPOINT_ID", "Buyer touchpoint id"}, {"TRANSITION_DATE", "Transition in date"}, {"STAGE_ID", "Stage id"}, {"LEAD_ID", "Lead id"}, {"CONTACT_ID", "Contact id"}, {"NEXT_STAGE_DATE", "Transition out date"},{"DAYS_IN_STAGE","Days in stage"}}),
+    //change transition in and out dates from datetime to date types
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Transition in date", type date}, {"Transition out date", type date}})
+in
+    #"Changed Type"
+
+// Stage
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="STAGE_DEFINITIONS"]}[Data],
+    //filter out deleted rows
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "IS_INACTIVE", "IS_IN_CUSTOM_MODEL", "IS_BOOMERANG", "IS_FROM_SALESFORCE", "IS_DELETED", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Stage id"}, {"STAGE_NAME", "Stage"}, {"STAGE_STATUS", "Stage status"}, {"RANK", "Stage rank"}, {"IS_TRANSITION_TRACKING", "In funnel"}, {"IS_DEFAULT", "Default"}})
+in
+    #"Renamed Columns"
+
+// Session
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="SESSIONS"]}[Data],
+    //filter out deleted rows and sessions which ocurred more than five years ago
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [EVENT_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Five years ago")))),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"COOKIE_ID", "MODIFIED_DATE", "IS_FIRST_SESSION", "SEARCH_PHRASE", "HAS_FORM", "HAS_CHAT", "HAS_EMAIL", "HAS_CRM_ACTIVITY", "DEVICE", "AD_PROVIDER", "ACCOUNT_UNIQUE_ID", "ACCOUNT_NAME", "ADVERTISER_UNIQUE_ID", "ADVERTISER_NAME", "SITE_UNIQUE_ID", "SITE_NAME", "PLACEMENT_UNIQUE_ID", "PLACEMENT_NAME", "CAMPAIGN_NAME", "AD_GROUP_UNIQUE_ID", "AD_GROUP_NAME", "AD_UNIQUE_ID", "AD_NAME", "CREATIVE_UNIQUE_ID", "CREATIVE_NAME", "CREATIVE_DESCRIPTION_1", "CREATIVE_DESCRIPTION_2", "CREATIVE_DESTINATION_URL", "CREATIVE_DISPLAY_URL", "KEYWORD_UNIQUE_ID", "KEYWORD_NAME", "KEYWORD_MATCH_TYPE", "CAMPAIGN", "SOURCE", "MEDIUM", "TERM", "CONTENT", "CITY", "REGION", "COUNTRY", "IP_ADDRESS", "IS_DELETED", "ROW_KEY", "ACCOUNT_ROW_KEY", "ADVERTISER_ROW_KEY", "SITE_ROW_KEY", "PLACEMENT_ROW_KEY", "CAMPAIGN_ROW_KEY", "AD_ROW_KEY", "AD_GROUP_ROW_KEY", "CREATIVE_ROW_KEY", "KEYWORD_ROW_KEY", "_CREATED_DATE", "_DELETED_DATE", "_MODIFIED_DATE", "LANDING_PAGE_RAW", "REFERRER_PAGE_RAW"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Session id"}, {"VISITOR_ID", "Visitor id"}, {"EVENT_DATE", "Session date"}, {"CHANNEL", "Channel id"}, {"PAGE_TITLE", "Page title"}, {"LANDING_PAGE", "Landing page"}, {"REFERRER_PAGE", "Referrer page"}, {"REFERRER_NAME", "Referrer name"}, {"WEB_SOURCE", "Web source"}, {"CAMPAIGN_UNIQUE_ID", "Campaign id"}, {"LANDING_PAGE_KEY", "Landing page id"}, {"REFERRER_PAGE_KEY", "Referrer page id"}}),
+    //change session date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Session date", type date}})
+in
+    #"Changed Type"
+
+// Form Submit
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="FORM_SUBMITS"]}[Data],
+    //filter out deleted rows, unprocesses rows, duplicate rows, and any forms submitted more than 5 years ago
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [IS_PROCESSED] = true and [IS_DUPLICATED] = false and [EVENT_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Five years ago")))),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"COOKIE_ID", "VISITOR_ID", "MODIFIED_DATE", "CURRENT_PAGE_RAW", "IP_ADDRESS", "TYPE", "USER_AGENT_STRING", "CLIENT_SEQUENCE", "CLIENT_RANDOM", "IS_DUPLICATED", "IS_PROCESSED", "FORM_TYPE", "FORM_IDENTIFIER", "ROW_KEY", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Form submit id"}, {"SESSION_ID", "Session id"}, {"EVENT_DATE", "Form date"}, {"CURRENT_PAGE", "Current page"}, {"EMAIL", "Email"}, {"FORM_SOURCE", "Source"}, {"CURRENT_PAGE_KEY", "Current page id"}}),
+    //change form date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Form date", type date}})
+in
+    #"Changed Type"
+
+// Page View
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="PAGE_VIEWS"]}[Data],
+    //filter out deleted and duplicate rows, and page views which ocurred longer than 5 years ago
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [IS_DUPLICATED] = false and [EVENT_DATE] >= DateTime.From(List.First(Table.Column(#"Filter Date", "Five years ago")))),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"COOKIE_ID", "VISITOR_ID", "MODIFIED_DATE", "CURRENT_PAGE_RAW", "IP_ADDRESS", "TYPE", "USER_AGENT_STRING", "CLIENT_SEQUENCE", "CLIENT_RANDOM", "IS_PROCESSED", "REFERRER_PAGE_RAW", "ROW_KEY",  "HAS_USER_CONSENT", "_CREATED_DATE", "_MODIFIED_DATE", "EMAIL", "_DELETED_DATE", "IS_DUPLICATED"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Page view id"}, {"SESSION_ID", "Session id"}, {"EVENT_DATE", "Page view date"}, {"CURRENT_PAGE", "Current page"}, {"REFERRER_PAGE", "Referrer page"}, {"PAGE_TITLE", "Page title"},{"CURRENT_PAGE_KEY", "Current page id"}, {"REFERRER_PAGE_KEY", "Referrer page id"}}),
+    //change page view date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Page view date", type date}})
+in
+    #"Changed Type"
+
+// Url
+let
+    //this query unions together all URL values from the session, page view, and form submit tables.  this table is used to create a common dimension table which can be used to filter these tables by URL using one filter.
+    Source = Value.NativeQuery(Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data],"select distinct u.id
+      ,u.row_key, u.page_title
+  from "&Schema&".SESSIONS     s
+       inner join
+       "&Schema&".URLS         u
+        on s.landing_page_key   = u.row_key
+       and u._deleted_date      is null
+ where s._deleted_date     is null 
+union
+select distinct u.id
+      ,u.row_key, u.page_title
+  from "&Schema&".PAGE_VIEWS   p
+       inner join
+       "&Schema&".URLS         u
+        on p.current_page_key   = u.row_key
+       and u._deleted_date      is null
+ where p._deleted_date  is null
+union
+select distinct u.id
+      ,u.row_key, u.page_title
+  from "&Schema&".form_submits f
+       inner join
+       "&Schema&".urls         u
+        on f.current_page_key    = u.row_key
+       and u._deleted_date      is null
+       and f.is_duplicated      = false
+ where f._deleted_date  is null",null, [EnableFolding=true]),
+    #"Renamed Columns" = Table.RenameColumns(Source,{{"ID", "Url"}, {"ROW_KEY", "Url id"}, {"PAGE_TITLE", "Page title"}})
+in
+    #"Renamed Columns"
+
+// Conversion Rate
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="DAILY_CONVERSION_RATE"]}[Data],
+    //filter to remove deleted rows
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"CONVERSION_DATE", "Conversion date"}, {"CURRENCY_ID", "Currency id"}, {"CONVERSION_RATE", "Conversion rate"}, {"SOURCE_ISO_CODE", "Source currency code"}, {"TARGET_ISO_CODE", "Target currency code"}}),
+    //change conversion date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Conversion date", type date}})
+in
+    #"Changed Type"
+
+// Date
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data],
+    //this query creates a temp date table in Snowflake.  this is needed to do some of the more complex calculations with date for other tables that exist only in Snowflake. 
+    #"Custom Query" = Value.NativeQuery(Source, "
+  WITH CTE_DATE AS (
+    SELECT DATEADD(DAY, SEQ4(), dateadd(year,-5,current_date())) AS DATE
+      FROM TABLE(GENERATOR(ROWCOUNT=>4000))  -- Number of days after reference date in previous line
+  )
+  SELECT DATE
+        ,YEAR(DATE)
+        ,QUARTER(DATE)
+        ,MONTH(DATE)
+        ,MONTHNAME(DATE)
+        ,TO_CHAR(DATE::date,'MMMM')||' '||YEAR(DATE) as Month
+        ,TO_CHAR(DATE::date,'MMMM')
+        ,DAY(DATE)
+        ,DAYOFWEEK(DATE)
+        ,YEAR(DATE)||TO_CHAR(DATE::date,'MM') as MonthSort
+    FROM CTE_DATE
+    ORDER BY DATE",null,[EnableFolding=true]),
+    #"Renamed Columns" = Table.RenameColumns(#"Custom Query",{{"DATE", "Date"}, {"YEAR(DATE)", "Year"}, {"QUARTER(DATE)", "Quarter"}, {"MONTH(DATE)", "Month Number"}, {"MONTHNAME(DATE)", "Month short"}, {"MONTH", "Month"}, {"TO_CHAR(DATE::DATE,'MMMM')", "Month name"}, {"DAY(DATE)", "Day"}, {"DAYOFWEEK(DATE)", "Day of week"},{"MONTHSORT", "Month sort"}}),
+    //change date from type datetime to date
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Date", type date}})
+in
+    #"Changed Type"
+
+// Attribution AI Touchpoint
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data],
+    //use a custom query to get the currently enabled (aka reportable) aai touchpoints
+    #"Custom Query" = Value.NativeQuery(Source, "select ait.score_date
+      ,ait.influenced_percent
+      ,ait.incremental_percent
+      ,ait.touchpoint_date
+      ,ait.touchpoint_event_id
+      ,ait.touchpoint_opportunity_id
+      ,ait.touchpoint_account_id
+      ,ait.touchpoint_lead_id
+      ,ait.touchpoint_contact_id
+      ,ais.app_id
+      ,ais.app_name
+      ,ais.created_date
+  from "&Schema&".attribution_ai_touchpoints   ait
+       join
+       "&Schema&".attribution_ai_sources       ais
+        on ait.aai_source_id    = ais.id
+       and ais._deleted_date is null
+       and ais.enabled = true
+ where ait._deleted_date is null",null,[EnableFolding=true]),
+    #"Renamed Columns" = Table.RenameColumns(#"Custom Query",{{"SCORE_DATE", "Score date"}, {"INFLUENCED_PERCENT", "Influenced"}, {"INCREMENTAL_PERCENT", "Incremental"}, {"TOUCHPOINT_DATE", "Touchpoint date"}, {"TOUCHPOINT_EVENT_ID", "Touchpoint event id"}, {"TOUCHPOINT_OPPORTUNITY_ID", "Opportunity id"}, {"TOUCHPOINT_ACCOUNT_ID", "Account id"}, {"TOUCHPOINT_LEAD_ID", "Lead id"}, {"TOUCHPOINT_CONTACT_ID", "Contact id"}, {"APP_ID", "App id"}, {"APP_NAME", "Model"}, {"CREATED_DATE", "App created date"}}),
+    //change from datetime to date data type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Touchpoint date", type date}, {"App created date", type date}})
+in
+    #"Changed Type"
+
+// Cohort Stage
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="STAGE_DEFINITIONS"]}[Data],
+    //filter out deleted rows
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "IS_INACTIVE", "IS_IN_CUSTOM_MODEL", "IS_BOOMERANG", "IS_FROM_SALESFORCE", "IS_DELETED", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Stage id"}, {"STAGE_NAME", "Stage"}, {"STAGE_STATUS", "Stage status"}, {"RANK", "Stage rank"}, {"IS_TRANSITION_TRACKING", "In funnel"}, {"IS_DEFAULT", "Default"}})
+in
+    #"Renamed Columns"
+
+// Cohort Cut Off Date
+let
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data],
+    //this query creates a temp date table in Snowflake.  this is needed to do some of the more complex calculations with date for other tables that exist only in Snowflake. 
+    #"Custom Query" = Value.NativeQuery(Source, "
+  WITH CTE_DATE AS (
+    SELECT DATEADD(DAY, SEQ4(), dateadd(year,-5,current_date())) AS DATE
+      FROM TABLE(GENERATOR(ROWCOUNT=>4000))  -- Number of days after reference date in previous line
+  )
+  SELECT DATE
+    FROM CTE_DATE",null,[EnableFolding=true]),
+    #"Renamed Columns" = Table.RenameColumns(#"Custom Query",{{"DATE", "Cut off date"}}),
+    //change date from type datetime to date
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Cut off date", type date}})
+in
+    #"Changed Type"
+
+// Lead (2)
+let
+//this table duplicated specifically for drill throughs where active connections could not be made to the original table
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="LEADS"]}[Data],
+    //filter out deleted rows and duplicates
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [IS_DUPLICATE] = false),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "WEB_SITE", "COMPANY", "LEAD_SOURCE", "CONVERTED_OPPORTUNITY_ID", "CONVERTED_CONTACT_ID", "ACCOUNTID", "BIZIBLE_STAGE_PREVIOUS", "ODDS_OF_CONVERSION", "LEAD_SCORE_MODEL", "LEAD_SCORE_RESULTS", "BIZIBLE_COOKIE_ID", "IS_DELETED", "SOURCE_SYSTEM", "OTHER_SYSTEM_ID", "CUSTOM_PROPERTIES", "ROW_KEY", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "SOURCE_ID","IS_DUPLICATE"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Lead id"}, {"CREATED_DATE", "Lead created date"}, {"IS_CONVERTED", "Converted"}, {"CONVERTED_DATE", "Converted date"}, {"BIZIBLE_STAGE", "Current stage"}, {"EMAIL", "Email"}}),
+    //change created date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Lead created date", type date}, {"Converted date", type date}}),
+    //change email to lower case
+    #"Lowercased Text" = Table.TransformColumns(#"Changed Type",{{"Email", Text.Lower, type text}})
+in
+    #"Lowercased Text"
+
+// Contact (2)
+let
+//this table duplicated specifically for drill throughs where active connections could not be made to the original table
+    Source = Snowflake.Databases(Server,Warehouse){[Name="BIZIBLE_ROI_V3"]}[Data]{[Name=Schema]}[Data]{[Name="CONTACTS"]}[Data],
+    //filter out deleted rows and duplicates
+    #"Filtered Rows" = Table.SelectRows(Source, each [_DELETED_DATE] = null and [IS_DUPLICATE] = false),
+    #"Removed Columns" = Table.RemoveColumns(#"Filtered Rows",{"MODIFIED_DATE", "LEAD_SOURCE", "BIZIBLE_STAGE_PREVIOUS", "ODDS_OF_CONVERSION", "BIZIBLE_COOKIE_ID", "IS_DELETED", "IS_DUPLICATE", "SOURCE_SYSTEM", "OTHER_SYSTEM_ID", "CUSTOM_PROPERTIES", "ROW_KEY", "_CREATED_DATE", "_MODIFIED_DATE", "_DELETED_DATE", "SOURCE_ID"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns",{{"ID", "Contact id"}, {"CREATED_DATE", "Contact created date"}, {"EMAIL", "Email"}, {"BIZIBLE_STAGE", "Current stage"}, {"ACCOUNTID", "Account id"}}),
+    //change created date from datetime to date type
+    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns",{{"Contact created date", type date}}),
+    //change email to lower case
+    #"Lowercased Text" = Table.TransformColumns(#"Changed Type",{{"Email", Text.Lower, type text}})
+in
+    #"Lowercased Text"
+    
+//OTHER QUERIES
+// _Measure
+let
+    Source = Table.FromRows(Json.Document(Binary.Decompress(Binary.FromText("i44FAA==", BinaryEncoding.Base64), Compression.Deflate)), let _t = ((type nullable text) meta [Serialized.Text = true]) in type table [_Measure = _t]),
+    #"Changed Type" = Table.TransformColumnTypes(Source,{{"_Measure", type text}}),
+    #"Renamed Columns" = Table.RenameColumns(#"Changed Type",{{"_Measure", "Measure"}}),
+    #"Removed Columns" = Table.RemoveColumns(#"Renamed Columns",{"Measure"})
+in
+    #"Removed Columns"
