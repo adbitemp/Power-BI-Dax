@@ -1,0 +1,1198 @@
+﻿DEFINE 
+---- MODEL MEASURES BEGIN ----
+MEASURE _Measure[Attributed deals] = 
+//count opportunies from the bat table since we want a count of attributed deals only
+//a deal is defined as a closed - won opportunity, filter to only these
+CALCULATE(
+    DISTINCTCOUNT('Buyer Attribution Touchpoint'[Opportunity id]),
+    FILTER(Opportunity, Opportunity[Closed] = TRUE()),
+    FILTER(Opportunity, Opportunity[Won] = TRUE())
+)
+
+
+MEASURE _Measure[Attributed deals drill] = 
+//this measured is used on the drill through to details page only.  filtering to closed - won opps is removed because it causes performance issues at the detail level, and the closed - won filters are passed at the page level, so not needed here.  the performance issue is likely due to the switching function that allows one detail page to be used for multiple measures.
+DISTINCTCOUNT('Buyer Attribution Touchpoint'[Opportunity id])
+MEASURE _Measure[Attributed revenue] = 
+//concatenate the attributed revenue amount and the currency code.  this measure is used to display both the amount and currency in the single value tile.
+CONCATENATE(
+    FORMAT(
+        IF(
+            ISBLANK([Attributed revenue amount])= TRUE(),0,[Attributed revenue amount])
+            ,"#,##0"),
+    " " & [Revenue currency]
+)
+
+
+MEASURE _Measure[Attributed revenue amount] = 
+VAR _attribution_model = [Selected attribution model]
+VAR _attribution_ai_type = [Selected ai attribution type]
+RETURN
+CALCULATE(
+    //if statement to check if the calculation is for BAT or AAI touchpoints
+    IF(
+        _attribution_model <> BLANK(),
+        //multiple the selected attribution model percentage by the opportunity amount, on a row by row basis before summing
+        SUMX(
+            'Buyer Attribution Touchpoint',
+            [Total opportunity amount] * (
+                SWITCH(
+                    _attribution_model,
+                    1,'Buyer Attribution Touchpoint'[First touch percent],
+                    2,'Buyer Attribution Touchpoint'[Lead creation percent],
+                    3,'Buyer Attribution Touchpoint'[U shape percent],
+                    4,'Buyer Attribution Touchpoint'[W shape percent],
+                    5,'Buyer Attribution Touchpoint'[Full path percent],
+                    6,'Buyer Attribution Touchpoint'[Custom percent]
+                ) / 100
+            )
+        ),
+        //multiple the selected aai attribution type by the opportuniyt amount, on a row by row basis before summing
+        SUMX( 
+            'Attribution AI Touchpoint',
+            [Total opportunity amount] * (
+                SWITCH(
+                    _attribution_ai_type,
+                    7,'Attribution AI Touchpoint'[Incremental],
+                    8,'Attribution AI Touchpoint'[Influenced]
+                ) / 100
+            )
+        )
+    ),
+    //revenue is defined as the amount from closed - won opportunities, filter to only these opportunities
+    Opportunity[Closed] = TRUE(),
+    Opportunity[Won] = TRUE(),
+    //use the inactive relationships between bat, campaign and channel, this is to speed up performance, instead of going through user touchpoint to these dimensions
+    //use the relationship between aai touchpoints and user touchpoints for channel and campaign dimensions, these dimensions are not denormalized on aai touchpoints
+    USERELATIONSHIP('Buyer Attribution Touchpoint'[Campaign Id],Campaign[Campaign id]),
+    USERELATIONSHIP('Buyer Attribution Touchpoint'[Channel id],Channel[Channel id]),
+    USERELATIONSHIP('Attribution AI Touchpoint'[Touchpoint event id],'User Touchpoint'[User touchpoint id]),
+    //ignore the active relationship between bat and user touchpoint
+    CROSSFILTER('Buyer Attribution Touchpoint'[User touchpoint id], 'User Touchpoint'[User touchpoint id],None)
+)
+
+
+MEASURE _Measure[Attribution coverage] = 
+[Attributed revenue amount]/[Total revenue amount]
+MEASURE _Measure[Contacts in stage] = 
+VAR _start_date = [Start date]
+VAR _end_date = [End date]
+RETURN
+//count the number of contacts in each stage
+CALCULATE(
+	COUNTROWS(
+        SUMMARIZE(
+            'Lead/Contact Stage Transition',
+            'Lead/Contact Stage Transition'[Contact id]
+        )
+    ),
+    //this filter is used to remove any duplicate contacts that may have stage transitions (the duplicate contacts are filtered out as a transformation step, so if no contact exists in the contact table, remove it from this count)
+    FILTER('Contact','Contact'[Contact id] <> BLANK()),
+	FILTER(Stage,Stage[Stage status] = "Open"),
+    FILTER(Stage,Stage[Show stage] = TRUE()),
+    USERELATIONSHIP('Lead/Contact Stage Transition'[Contact id], Contact[Contact id]),
+	KEEPFILTERS(
+        //transition must meet one of these criteria to be counted
+            //the contact transitioned into the stage during the selected date range
+            //OR the contact was in the stage and transitioned out of the stage during the selected date range
+            //OR the contact transitioned into the stage before the selected start date, and transitioned out after the selected end date
+            //OR the contact transitioned into the stage before the selected start date, and hasn't transitioned out (aka transition out date is blank)
+        FILTER(
+            ALLSELECTED('Lead/Contact Stage Transition'[Transition in date], 'Lead/Contact Stage Transition'[Transition out date]),
+            ('Lead/Contact Stage Transition'[Transition in date] >= _start_date && 'Lead/Contact Stage Transition'[Transition in date] <= _end_date)
+            || ('Lead/Contact Stage Transition'[Transition out date] >= _start_date && 'Lead/Contact Stage Transition'[Transition out date] <= _end_date)
+            || ('Lead/Contact Stage Transition'[Transition in date] <= _start_date && 'Lead/Contact Stage Transition'[Transition out date] >= _end_date)
+            || ('Lead/Contact Stage Transition'[Transition in date] <= _start_date && 'Lead/Contact Stage Transition'[Transition out date] = BLANK())
+        )
+    )
+)
+
+
+MEASURE _Measure[Corporate currency] = 
+//if no value is found for the corporate currency, return "??"
+SELECTEDVALUE(
+    'Corporate Currency'[Currency],
+    "??"
+)
+
+
+MEASURE _Measure[Cost] = 
+//this measure concatenates the actual calculated cost with the currency value.  it is used to nicely display both the amount and the currency in the single values tiles.
+CONCATENATE(
+    FORMAT(
+        IF(
+            ISBLANK([Cost amount])= TRUE(),0,[Cost amount])
+            ,"#,##0"),
+    " " & [Cost currency]
+)
+
+
+MEASURE _Measure[Cost (Negative)] = 
+//multiple cost by negative 1.  this measure is used to display cost as negative in a visualization which also includes revenue (positive)
+[Cost amount] * -1
+
+
+MEASURE _Measure[Cost amount] = 
+VAR _corporate_currency = [Corporate currency]
+VAR _selected_currency = [Selected currency]
+RETURN
+//this measure performs the currency conversion for cost
+//sum on a row by row basis
+SUMX(
+    Cost,
+    //if the conversion rate doesn't exist, then perform the calculation without it, else convert and then calcuate
+    IF(
+        //lookup the conversion rate for the cost in it's original currency (i.e. join on original currency id and cost date), if conversion rate doesn't exist, use the amount value without converting
+        LOOKUPVALUE(
+            'Conversion Rate'[Conversion rate],
+            'Conversion Rate'[Currency id],Cost[Currency id],
+            'Date'[Date],Cost[Cost date],
+            'Conversion Rate'[Target currency code],_corporate_currency
+        ) = BLANK(),
+        Cost[Cost in micro] / 1000000,
+        //divide the cost amount by the conversion rate for the original currency (this converts the value to the corporate currency)
+        (Cost[Cost in micro] / 1000000) / (LOOKUPVALUE(
+            'Conversion Rate'[Conversion rate],
+            'Conversion Rate'[Currency id],Cost[Currency id],
+            'Date'[Date],Cost[Cost date],
+            'Conversion Rate'[Target currency code],_corporate_currency
+        ) )
+    //multiple the currency converted to corporate by the conversion rate for the user selected currency (this converts the corporate currency to the currency selected by the report user)
+    ) * 
+        //lookup the conversion rate for the currency selected by the user (i.e. join on user selected currency id and cost date), if conversion rate doesn't exist, multiply by 1
+        LOOKUPVALUE(
+        'Conversion Rate'[Conversion rate],
+        'Conversion Rate'[Source currency code],_selected_currency,
+        'Date'[Date],Cost[Cost date],
+        'Conversion Rate'[Target currency code], _corporate_currency,        
+        1
+    )
+)
+
+
+MEASURE _Measure[Cost currency] = 
+//this measure checks to make sure the currency can be converted, if not, return a "mixed currency" warning.  (a currency cannot be converted when no corresponding conversion rate exists for it)
+//count the number of distinct currency codes present in the calcuation, if it's greater than one OR it's blank, display the mixed currency warning
+IF(
+    //the first check is to see if a conversion rate always exists to the user selected currency
+    COUNTROWS(
+        DISTINCT(
+            SELECTCOLUMNS(
+                Cost,
+                "Currency Count",
+                //if the conversion rate for the user selected currency can't be found, return "?", otherwise return the user selected currency
+                IF(
+                    LOOKUPVALUE(
+                        'Conversion Rate'[Source currency code],
+                        'Conversion Rate'[Source currency code],[Selected currency],
+                        'Date'[Date],Cost[Cost date],
+                        'Conversion Rate'[Target currency code],[Corporate currency]
+                    ) = BLANK(),
+                    "?",
+                    [Selected currency]
+                )
+            )
+        )
+    //checks if the count of currencies represented is greater than 1
+    ) > 1
+    ||
+    //OR checks if there are no conversion rates which match (aka no currency code is returned)
+    SELECTCOLUMNS(
+        Cost,
+        "Currency Count",
+        LOOKUPVALUE(
+            'Conversion Rate'[Source currency code],
+            'Conversion Rate'[Source currency code],[Selected currency],
+            'Date'[Date],Cost[Cost date],
+            'Conversion Rate'[Target currency code],[Corporate currency]
+        ) = BLANK()
+    ),
+    "Mixed Currency!",
+    //the second check is to see if the conversion rate always exists to the corporate currency
+    IF(
+        COUNTROWS(
+            DISTINCT(
+                SELECTCOLUMNS(
+                    Cost,
+                    "Currency Count",
+                    //if the conversion rate for the original cost currency cannot be found, return "?", otherwise return the user selected currency
+                    IF(
+                        LOOKUPVALUE(
+                            'Conversion Rate'[Source currency code],
+                            'Conversion Rate'[Currency id],Cost[Currency id],
+                            'Date'[Date],Cost[Cost date],
+                            'Conversion Rate'[Target currency code],[Corporate currency]
+                            ) = BLANK(),
+                            "?",
+                            [Selected Currency]
+                    )
+                )
+            )
+        //checks if the count of currencies represented is greater than 1
+        ) > 1
+        ||
+        //OR checks if there are no conversion rates which match (aka no currency code is returned)
+        SELECTCOLUMNS(
+            Cost,
+            "Currency Count",
+            LOOKUPVALUE(
+                'Conversion Rate'[Source currency code],
+                'Conversion Rate'[Currency id],Cost[Currency id],
+                'Date'[Date],Cost[Cost date],
+                'Conversion Rate'[Target currency code],[Corporate currency]
+            ) = BLANK()
+        ),
+        "Mixed Currency!",
+        //if none of the scenarios above are returned, all conversion rates existed and the conversion was performed correctly, return the Selected Currency
+        [Selected Currency]
+    )
+)   
+
+ 
+MEASURE _Measure[Cost per attributed deal] = 
+//calcuate the cost per attributed deal, divide the cost by the number of attributed deals.  if there are 0 attributed deals, return blank.
+DIVIDE(
+    [Cost amount],
+    [Attributed deals],
+    BLANK()
+)
+
+
+MEASURE _Measure[Cost per new lead] = 
+//calculate the cost per new lead, divide cost by number of new leads.  if there are 0 new leads, return blank
+DIVIDE(
+    [Cost amount],
+    [New leads],
+    BLANK()
+)
+
+
+MEASURE _Measure[Cost per new opportunity] = 
+//calculate the cost per new opportunity, divide cost by number of new opportunities.  if there are 0 new opportunities, return blank
+DIVIDE(
+    [Cost amount]
+    ,[New opportunities]
+    ,BLANK()
+)
+
+
+MEASURE _Measure[Cost per total new lead] = 
+//calculate the cost per total new lead, divide cost by number of total new leads.  if there are 0 total new leads, return blank
+DIVIDE(
+    [Cost amount],
+    [Total new leads],
+    BLANK()
+)
+
+
+MEASURE _Measure[Cost per total new opportunity] = 
+//calculate the cost per total new opportunity, divide cost by number of total new opportunities.  if there are 0 total new opportunities, return blank
+DIVIDE(
+    [Cost amount], 
+    [Total new opportunities], 
+    BLANK()
+)
+
+
+MEASURE _Measure[Deal velocity] = 
+CALCULATE(
+    AVERAGE('Opportunity Stage Transition'[Days to close]),
+    FILTER(Opportunity,Opportunity[Closed] = TRUE()),
+    FILTER(Opportunity,Opportunity[Won] = TRUE())
+)
+
+
+MEASURE _Measure[Description - Lead/Contact velocity by channel] = 
+IF(
+    [Selected object] = "Lead",
+    "Average days in each stage for all Leads with BTs, grouped by channel.",
+    "Average days in each stage for all Contacts with BTs, grouped by channel."
+)
+
+
+MEASURE _Measure[Description - Lead/Contact velocity by stage] = 
+IF(
+    [Selected object] = "Lead",
+    "Average days in each stage for all Leads with BTs.",
+    "Average days in each stage for all Contacts with BTs."
+)
+
+
+MEASURE _Measure[Description - Lead/Contact velocity over time] = 
+IF(
+    [Selected object] = "Lead",
+    "Average days in each stage for all Leads with BTs over the specified time period.",
+    "Average days in each stage for all Contacts with BTs over the specified time period."
+)
+
+
+MEASURE _Measure[End date] = 
+//this measure is used to obtain the end date the user has filtered to
+LASTDATE('Date'[Date])
+MEASURE _Measure[Forms] = 
+//count the number of forms
+CALCULATE(
+    DISTINCTCOUNT('Form Submit'[Form submit id]),
+    //filter based on the form date (use this inactive relationship)
+    USERELATIONSHIP('Form Submit'[Form date], 'Date'[Date]),
+    //filter based on the channel and campaign dimensions connected to the session table
+    USERELATIONSHIP('Session'[Channel id],Channel[Channel id]),
+    USERELATIONSHIP('Session'[Campaign id],Campaign[Campaign id]),
+    //filter based on the page url from the form table
+    USERELATIONSHIP('Form Submit'[Current page id],'Url'[Url id]),
+    //ignore the relationship between session and user touchpoint
+    CROSSFILTER('Session'[Session id], 'User Touchpoint'[Session id],None)
+
+)
+
+
+MEASURE _Measure[Lead/Contact id] = 
+VAR _object = [Selected object]
+RETURN
+//switches the id value shown in the drill through details depending on which object is selected
+IF(
+    _object = "Lead",
+    MAX('Lead/Contact Stage Transition'[Lead id]),
+    MAX('Lead/Contact Stage Transition'[Contact id])
+)
+
+
+MEASURE _Measure[Leads created from forms] = 
+//count leads created from forms
+CALCULATE(
+    //count only leads with attribution (this is because we need the flags in the bt field to determine if the lead was from a form)
+    DISTINCTCOUNT('Buyer Touchpoint'[Lead id]),
+    //filter to only bts flaged as lead creation and form submit bts
+    'Buyer Touchpoint'[Is lead creation] = TRUE(),
+    'Buyer Touchpoint'[Is form submit] = TRUE(),
+    //filter to only "web form" type touchpoints
+    'Buyer Touchpoint'[Touch type] = "Web Form",
+    //filter to only web touchpoints
+    'Buyer Touchpoint'[Visitor id] <> BLANK(),
+    //filter any ids where there is no corresponding lead in the lead table, this is because duplicate leads are removed, but duplicate touchpoints might not be
+    FILTER('Lead','Lead'[Lead id] <> BLANK()),
+    //filter based on the touchpoint date, form page url, and the relationship between bt and lead
+    USERELATIONSHIP('Buyer Touchpoint'[Lead id],'Lead'[Lead id]),
+    USERELATIONSHIP('Buyer Touchpoint'[Touchpoint date],'Date'[Date]),
+    USERELATIONSHIP('Buyer Touchpoint'[Form page id],'Url'[Url id]),
+    USERELATIONSHIP('Buyer Touchpoint'[Channel id],Channel[Channel id]),
+    USERELATIONSHIP('Buyer Touchpoint'[Campaign id],Campaign[Campaign id]),
+    //ignore the relationship between user thouchpoint and bt
+    CROSSFILTER('Buyer Touchpoint'[User touchpoint id], 'User Touchpoint'[User touchpoint id],None)
+)
+
+
+MEASURE _Measure[Leads created from forms drill] = 
+//this measure is used to get the drill through page to render for this metric
+CALCULATE(
+    //count only leads with attribution (this is because we need the flags in the bt field to determine if the lead was from a form)
+    DISTINCTCOUNT('Buyer Touchpoint'[Lead id]),
+    'Buyer Touchpoint'[Is lead creation] = TRUE(),
+    'Buyer Touchpoint'[Is form submit] = TRUE(),
+    //filter to only "web form" type touchpoints
+    'Buyer Touchpoint'[Touch type] = "Web Form",
+    //filter to only web touchpoints
+    'Buyer Touchpoint'[Visitor id] <> BLANK(),
+    // //filter based on the touchpoint date, form page url, and the relationship between bt and lead
+    USERELATIONSHIP('Buyer Touchpoint'[Touchpoint date],'Date'[Date]),
+    USERELATIONSHIP('Buyer Touchpoint'[Form page id],'Url'[Url id]),
+    USERELATIONSHIP('Buyer Touchpoint'[Lead id],'Lead'[Lead id]),
+    USERELATIONSHIP('Buyer Touchpoint'[Channel id],Channel[Channel id]),
+    USERELATIONSHIP('Buyer Touchpoint'[Campaign id],Campaign[Campaign id]),
+    CROSSFILTER('Buyer Touchpoint'[User touchpoint id],'User Touchpoint'[User touchpoint id],None)
+)
+
+
+MEASURE _Measure[Leads in stage] = 
+VAR _start_date = [Start date]
+VAR _end_date = [End date]
+RETURN
+//count the number of leads in each stage
+CALCULATE(
+	COUNTROWS(
+        SUMMARIZE(
+            'Lead/Contact Stage Transition',
+            'Lead/Contact Stage Transition'[Lead id]
+        )
+    ),
+    //this filter is used to remove any duplicate leads that may have stage transitions (the duplicate leads are filtered out as a transformation step, so if no lead exists in the lead table, remove it from this count)
+    FILTER('Lead','Lead'[Lead id] <> BLANK()),
+	FILTER(Stage,Stage[Stage status] = "Open"),
+    FILTER(Stage,Stage[Show stage] = TRUE()),
+    USERELATIONSHIP('Lead/Contact Stage Transition'[Lead id],'Lead'[Lead id]),
+	KEEPFILTERS(
+        //transition must meet one of these criteria to be counted
+            //the lead transitioned into the stage during the selected date range
+            //OR the lead was in the stage and transitioned out of the stage during the selected date range
+            //OR the lead transitioned into the stage before the selected start date, and transitioned out after the selected end date
+            //OR the lead transitioned into the stage before the selected start date, and hasn't transitioned out (aka transition out date is blank)
+        FILTER(
+            ALLSELECTED('Lead/Contact Stage Transition'[Transition in date], 'Lead/Contact Stage Transition'[Transition out date]),
+            ('Lead/Contact Stage Transition'[Transition in date] >= _start_date && 'Lead/Contact Stage Transition'[Transition in date] <= _end_date)
+            || ('Lead/Contact Stage Transition'[Transition out date] >= _start_date && 'Lead/Contact Stage Transition'[Transition out date] <= _end_date)
+            || ('Lead/Contact Stage Transition'[Transition in date] <= _start_date && 'Lead/Contact Stage Transition'[Transition out date] >= _end_date)
+            || ('Lead/Contact Stage Transition'[Transition in date] <= _start_date && 'Lead/Contact Stage Transition'[Transition out date] = BLANK())
+        )
+    )
+)
+
+
+MEASURE _Measure[Leads/Contacts in stage] = 
+//determines which calculation to show in the visual based on the customer selected default object
+VAR _object = [Selected object]
+VAR _lead_count  = [Leads in stage]
+VAR _contact_count = [Contacts in stage]
+RETURN
+IF(
+    _object = "Lead",
+    _lead_count,
+    _contact_count
+)
+
+
+MEASURE _Measure[LinkedIn lead gen forms] = 
+//count the number of lead gen forms
+//if the URL filter is applied, return blank as this filter does not apply to lead gen forms
+IF(
+    ISFILTERED('Url'[Url]), 
+    BLANK(),
+    CALCULATE(
+        DISTINCTCOUNT(Activity[Activity id]),
+        //filter activies to those labeled as lead gen form, with an activity date between the selected start and end dates
+        FILTER(Activity,CONTAINSSTRING(Activity[Activity name],"*Lead Gen Form*")),
+        FILTER(Activity,Activity[Activity start date] >= [Start date]),
+        FILTER(Activity,Activity[Activity start date] <= [End date])
+    )
+)
+
+
+MEASURE _Measure[Measure] = 
+CONCATENATE([Opportunity cohort start stage],[Opp cohort follow on stages (original table)])
+
+
+MEASURE _Measure[Most recent form date] = 
+//this measure finds the most recent form date, it is used in a drill through details page
+CALCULATE(
+    MAX('Form Submit'[Form date]),
+    //filter based on the form date
+    USERELATIONSHIP('Form Submit'[Form date],'Date'[Date])
+)
+
+
+MEASURE _Measure[Most recent session date] = 
+//this measure finds the most recent session date
+CALCULATE(
+    MAX('Session'[Session date]),
+    //filter based on the session date
+    USERELATIONSHIP('Session'[Session date],'Date'[Date])
+)
+
+
+MEASURE _Measure[New leads] = 
+CALCULATE(
+    //this is a count of attributed leads, only attributed leads have bts, so use the bt table to count from
+    DISTINCTCOUNT('Buyer Touchpoint'[Lead id]),
+    //lead created date determines if a lead is new, use this date to filter by (allow this inactive relationship)
+    USERELATIONSHIP('Lead'[Lead created date], 'Date'[Date]),
+    USERELATIONSHIP('Buyer Touchpoint'[Campaign id], Campaign[Campaign id]),
+    USERELATIONSHIP('Buyer Touchpoint'[Channel id], Channel[Channel id]),
+    CROSSFILTER('Buyer Touchpoint'[User touchpoint id], 'User Touchpoint'[User touchpoint id],None),
+    //do not count any valus where the lead doesn't exist in the lead table, this means it's a touchpoint for a duplicate lead
+    FILTER('Lead','Lead'[Lead id] <> BLANK())
+)
+
+
+MEASURE _Measure[New leads drill] = 
+CALCULATE(
+    DISTINCTCOUNT('Buyer Touchpoint'[Lead id]),
+    USERELATIONSHIP('Lead'[Lead created date], 'Date'[Date]),
+    USERELATIONSHIP('Buyer Touchpoint'[Campaign id], Campaign[Campaign id]),
+    USERELATIONSHIP('Buyer Touchpoint'[Channel id], Channel[Channel id])
+)
+
+
+MEASURE _Measure[New opportunities] = 
+//this measure calculates total new opportunities, defined as attributed opportunities only, which is why it counts opportunities from the bat table
+CALCULATE(
+    DISTINCTCOUNT('Buyer Attribution Touchpoint'[Opportunity id]),
+    //new opportunity is determined by it's created date, use created date to filter date (use this inactive relationship)
+    USERELATIONSHIP(Opportunity[Opportunity created date], 'Date'[Date]),
+    //do not use the active relationship between close date and date
+    CROSSFILTER(Opportunity[Opportunity close date], 'Date'[Date], None),
+    CROSSFILTER(Opportunity[Opportunity id],'Buyer Attribution Touchpoint'[Opportunity id],OneWay)
+)
+
+
+MEASURE _Measure[Non-attributed revenue] = 
+[Total revenue amount] - [Attributed revenue amount]
+MEASURE _Measure[Opp cohort closed won] = 
+VAR _start_date = [Start date]
+VAR _cut_off_date = SELECTEDVALUE('Cohort Cut Off Date'[Cut off date])
+RETURN
+CALCULATE(
+    DISTINCTCOUNT('Opportunity Stage Transition'[Opportunity id]),
+    FILTER(Opportunity, Opportunity[Won] = TRUE()),
+    FILTER(Opportunity, Opportunity[Closed] = TRUE()),
+    FILTER(Opportunity, Opportunity[Opportunity close date] <= _cut_off_date),
+    FILTER(Opportunity, Opportunity[Opportunity close date] >= _start_date),
+    CROSSFILTER(Opportunity[Opportunity close date], 'Date'[Date], None)
+)
+
+
+MEASURE _Measure[Opp cohort follow on stages (original table)] = 
+//declare variables for dates.  this greatly speeds up performance. 
+VAR _start_date = [Start date]
+VAR _end_date = [End date]
+VAR _cut_off_date = SELECTEDVALUE('Cohort Cut Off Date'[Cut off date])
+VAR _stage_rank = [Selected stage rank]
+VAR _stage_id   = [Selected cohort stage id]
+VAR _cohort_ids =  [Opp id list (cohort start stage)]
+VAR _cohort_ids_test = [Measure 2]
+RETURN
+CALCULATE(
+    DISTINCTCOUNT('Opportunity Stage Transition'[Opportunity id]),
+    //follow up stages are stages after the cohort start stage selected by the user, and only show opp and funnel stages
+    FILTER(Stage,Stage[Stage rank] > _stage_rank),
+    FILTER(Stage,Stage[Show stage] = TRUE()),
+    FILTER(Stage,[Opp stage] = TRUE()),
+    //transition in must be after the filtered start date and before the selected cut off date
+    'Opportunity Stage Transition'[Transition in date] <= _cut_off_date,
+    'Opportunity Stage Transition'[Transition in date] >= _start_date,
+    FILTER('Opportunity Stage Transition', 'Opportunity Stage Transition'[Opportunity id] IN {_cohort_ids})
+)
+
+
+MEASURE _Measure[Opp count drill through filter] = 
+//this measure determines which "drill" measure to use for the drill through details page, it chooses based on which measure the user clicked into to see details
+IF(
+    SWITCH(
+        [Selected opp count],
+        "'_Measure'[New opportunities]", [New opportunities],
+        "'_Measure'[Attributed deals]", [Attributed deals drill],
+        "'_Measure'[Total deals]", [Total deals drill],
+        "'_Measure'[Total new opportunities]", [Total new opportunities]
+    ) = 1
+    || ( [Selected opp count] = "'_Measure'[Deal velocity]" && [Deal velocity] >= 1),
+    1,
+    0
+)
+
+
+MEASURE _Measure[Opp id list (cohort start stage)] = 
+//this returns a list of opp ids for the selected cohort.  this list should be used to filter all subsequent stages.  
+//have not found a way to do this yet.  the issue is this produces one string, and we need it to look like a list of strings.  even addin the appropriate "" around each value has not helped.  
+VAR _start_date = [Start date]
+VAR _end_date = [End date]
+VAR _cohort_stage_id = SELECTEDVALUE('Cohort Stage'[Stage id])
+RETURN
+CALCULATE(
+    CONCATENATEX(
+        'Opportunity Stage Transition',
+        'Opportunity Stage Transition'[Opportunity id],
+        " , "
+    ),
+    'Lead/Contact Stage Transition'[Transition in date] >= _start_date,
+    'Lead/Contact Stage Transition'[Transition in date] <= _end_date,
+    'Opportunity Stage Transition'[Stage id] = _cohort_stage_id
+    // USERELATIONSHIP('Opportunity Stage Transition'[Transition in date],'Date'[Date]),
+    // USERELATIONSHIP('Opportunity Stage Transition'[Stage id],'Cohort Stage'[Stage id])
+)
+
+
+MEASURE _Measure[Opportunities in stage] = 
+//count the number of opportunities in each stage
+CALCULATE(
+    DISTINCTCOUNT('Opportunity Stage Transition'[Opportunity id]),
+    FILTER(Stage,Stage[Stage status] = "Open"),
+    FILTER(Stage,Stage[Show stage] = TRUE()),
+    KEEPFILTERS(
+        //transition must meet one of these criteria to be counted
+            //the opp transitioned into the stage during the selected date range
+            //OR the opp was in the stage and transitioned out of the stage during the selected date range
+            //OR the opp transitioned into the stage before the selected start date, and transitioned out after the selected end date
+            //OR the opp transitioned into the stage before the selected start date, and hasn't transitioned out (aka transition out date is blank)
+        FILTER(
+            ALL('Opportunity Stage Transition'[Transition in date], 'Opportunity Stage Transition'[Transition out date]),
+                ('Opportunity Stage Transition'[Transition in date] >= [Start date] && 'Opportunity Stage Transition'[Transition in date] <= [End date])
+                || ('Opportunity Stage Transition'[Transition out date] >= [Start date] && 'Opportunity Stage Transition'[Transition out date] <= [End date])
+                || ('Opportunity Stage Transition'[Transition in date] <= [Start date] && 'Opportunity Stage Transition'[Transition out date] >= [End date])
+                || ('Opportunity Stage Transition'[Transition in date] <= [Start date] && 'Opportunity Stage Transition'[Transition out date] = BLANK())
+            )
+        ),
+    //disregard the active relationship between close date and date
+    CROSSFILTER(Opportunity[Opportunity close date], 'Date'[Date], None)
+)
+
+
+MEASURE _Measure[Opportunity cohort start stage] = 
+CALCULATE(
+    DISTINCTCOUNT('Opportunity Stage Transition'[Opportunity id]),
+    USERELATIONSHIP('Opportunity Stage Transition'[Transition in date], 'Date'[Date]),
+    USERELATIONSHIP('Opportunity Stage Transition'[Stage id],'Cohort Stage'[Stage id]),
+    CROSSFILTER('Opportunity Stage Transition'[Stage id],Stage[Stage id],None)
+)
+
+
+MEASURE _Measure[Opportunity velocity] = 
+CALCULATE(
+    AVERAGE('Opportunity Stage Transition'[Days in stage]),
+    //filter on transition in date, use the inactive relationship
+    USERELATIONSHIP('Opportunity Stage Transition'[Transition in velocity],'Date'[Date])
+)
+
+
+MEASURE _Measure[Page views] = 
+//count the number of page views
+CALCULATE(
+    DISTINCTCOUNT('Page View'[Page view id]),
+    //filter based on the page view date, the page view url, the channel and campaign values from the correlated session
+    USERELATIONSHIP('Page View'[Page view date],'Date'[Date]),
+    USERELATIONSHIP('Session'[Channel id],Channel[Channel id]),
+    USERELATIONSHIP('Session'[Campaign id],Campaign[Campaign id]),
+    USERELATIONSHIP('Page View'[Current page id],'Url'[Url id])
+)
+
+
+MEASURE _Measure[People touched] = 
+//count distinct emails ("people")
+CALCULATE(
+    DISTINCTCOUNT('User Touchpoint'[Email]),
+    //allow the date filter to filter this metric by touchpoint date (use this inactive relationship)
+    USERELATIONSHIP('User Touchpoint'[Touchpoint date], 'Date'[Date])
+)
+
+
+MEASURE _Measure[Realized attributed revenue] = 
+//this measure concatenates the amount and the currency value for use in single value tiles
+CONCATENATE(
+    FORMAT(
+        IF(
+            ISBLANK([Realized attributed revenue amount])= TRUE(),0,[Realized attributed revenue amount])
+            ,"#,##0"),
+    " " & [Revenue currency]
+)
+
+
+MEASURE _Measure[Realized attributed revenue amount] = 
+CALCULATE(
+    //if the attribution model is for BAT, then use BA touchpoints, else use AAI touchpoints
+    IF(
+        [Selected attribution model] <> BLANK(),
+    //multiply the opportunity amount by the selected attribution percentatage.  do so on a row by row basis before summing
+        SUMX(
+            'Buyer Attribution Touchpoint',
+            [Total opportunity amount] * (
+                SWITCH(
+                    [Selected attribution model],
+                    1,'Buyer Attribution Touchpoint'[First touch percent],
+                    2,'Buyer Attribution Touchpoint'[Lead creation percent],
+                    3,'Buyer Attribution Touchpoint'[U shape percent],
+                    4,'Buyer Attribution Touchpoint'[W shape percent],
+                    5,'Buyer Attribution Touchpoint'[Full path percent],
+                    6,'Buyer Attribution Touchpoint'[Custom percent]
+                ) / 100
+            )
+        ),
+        //multiply the oppotunity amount by the selected aai attribution type percentage.  do so on a row by row basis before summing
+        SUMX(
+            'Attribution AI Touchpoint',
+            [Total opportunity amount] * (
+                SWITCH(
+                    [Selected ai attribution type],
+                    7,'Attribution AI Touchpoint'[Incremental],
+                    8,'Attribution AI Touchpoint'[Influenced]
+                ) / 100
+            )
+        )
+    ),
+    //revenue is defined as amount from closed - won opportunities, filter to just these opportunities
+    Opportunity[Closed] = TRUE(),
+    Opportunity[Won] = TRUE(),
+    //realized revenue is based of the touchpoint date, use the touchpoint date as the date filter
+    USERELATIONSHIP('User Touchpoint'[Touchpoint date],'Date'[Date]),
+    USERELATIONSHIP('Attribution AI Touchpoint'[Touchpoint date],'Date'[Date]),
+    //ignore the relationship between close date and date, so this measure is not filterd by close date
+    CROSSFILTER(Opportunity[Opportunity close date], 'Date'[Date], None)
+)
+
+
+MEASURE _Measure[Realized ROI] = 
+//this measure formats the realized ROI amount for displaying in a single value tile
+CONCATENATE(
+    FORMAT([Realized ROI amount],"#,##0.00"),
+     " x"
+)
+
+
+MEASURE _Measure[Realized ROI amount] = 
+//realized roi is realized attributed revenue divied by cost, if cost is blank, return blank
+IF(
+    [Cost amount] = BLANK(),
+    BLANK(),
+    [Realized attributed revenue amount] / [Cost amount]
+) 
+
+   
+MEASURE _Measure[Revenue currency] = 
+//this measure checks to make sure the currency can be converted, if not, return a "mixed currency" warning.  (a currency cannot be converted when no corresponding conversion rate exists for it)
+//count the number of distinct currency codes present in the calcuation, if it's greater than one or there are no currency code found, display the mixed currency warning
+IF(
+    COUNTROWS(
+        //the first check is to see if a conversion rate is present for converting from opp currency to corporate
+        DISTINCT(
+            SELECTCOLUMNS(
+                Opportunity,
+                "Currency Count",
+                //check to make sure the conversion rate exists for the user selected currency, select "?" if it's missing, otherwise show the selected currency
+                IF(
+                    LOOKUPVALUE(
+                        'Conversion Rate'[Source currency code],
+                        'Conversion Rate'[Source currency code],[Selected Currency],
+                        'Date'[Date],Opportunity[Opportunity close date],
+                        'Conversion Rate'[Target currency code],[Corporate currency]
+                    ) = BLANK(),
+                    "?",
+                    [Selected Currency]
+                )
+            )
+        )
+    //there should not be more than one currency represented
+    ) > 1 
+    //or check to see if no conversion rate is present
+    || 
+    SELECTCOLUMNS(
+        Opportunity,
+        "Currency Count",
+        LOOKUPVALUE(
+            'Conversion Rate'[Source currency code],
+            'Conversion Rate'[Source currency code],[Selected Currency],
+            'Date'[Date],Opportunity[Opportunity close date],
+            'Conversion Rate'[Target currency code],[Corporate currency]
+        ) = BLANK()
+    ),
+    //return mixed currency if either of the two scenarios are true (count of currencies is blank, or greater than 1)
+    "Mixed Currency!",
+    // count the number of distinct currency codes present in the calculation, if it's greater than one OR there is no currency code found, display the mixed currency warning
+    IF(
+        COUNTROWS(
+            DISTINCT(
+                //the second check is to see if the conversion rate is present for converting from corporate currency to the user selected currency
+                SELECTCOLUMNS(
+                    Opportunity,
+                    "Currency Count",
+                    //check to make sure the conversion rate exists for the original opportunity currency, select "?" if it's missing, otherwise show the selected currency
+                    IF(
+                        LOOKUPVALUE(
+                            'Conversion Rate'[Source currency code],
+                            'Conversion Rate'[Currency Id],Opportunity[Currency id],
+                            'Date'[Date],Opportunity[Opportunity close date],
+                            'Conversion Rate'[Target currency code],[Corporate currency]
+                            ) = BLANK(),
+                            "?",
+                            [Selected Currency]
+                    )
+                )
+            )
+        //there should not be more than one value returned here
+        ) > 1 
+        //or check to see if no conversion rate is present
+        || 
+        SELECTCOLUMNS(
+            Opportunity,
+            "Currency Count",
+            LOOKUPVALUE(
+                'Conversion Rate'[Source currency code],
+                'Conversion Rate'[Source currency code],[Selected Currency],
+                'Date'[Date],Opportunity[Opportunity close date],
+                'Conversion Rate'[Target currency code],[Corporate currency]
+            ) = BLANK()
+        ),
+        //return mixed currency if either of the two scenarioes are true (count of currencies is blank, or greater than 1)
+        "Mixed Currency!",
+        //else the conversion was successful, display the user selected currency
+        [Selected Currency]
+    )
+)
+
+
+MEASURE _Measure[Revenue drill through filter] = 
+//this measure determines which "drill" measure to use for the drill through details page, it chooses based on which measure the user clicked into to see details
+IF(
+    SWITCH(
+        [Selected revenue type],
+        "'_Measure'[Attributed revenue]", [Attributed revenue amount],
+        "'_Measure'[Attributed revenue amount]", [Attributed revenue amount],
+        "'_Measure'[Realized attributed revenue]", [Realized attributed revenue amount],
+        "'_Measure'[Realized attributed revenue amount]", [Realized attributed revenue amount],
+        "'_Measure'[Total revenue]", [Total revenue amount],
+        "'_Measure'[Total revenue amount]", [Total revenue amount],
+        "'_Measure'[Unrealized attributed pipeline revenue]", [Unrealized attributed pipeline revenue amount],
+        "'_Measure'[Unrealized attributed pipeline revenue amount]", [Unrealized attributed pipeline revenue amount]
+    ) > 0,
+    1,
+    0
+)
+
+
+MEASURE _Measure[Selected ai attribution type] = 
+//this measure represents the ai attribution type selected by the user
+SELECTEDVALUE('Attribution AI Type'[Code])
+
+
+MEASURE _Measure[Selected attribution model] = 
+//this measure represents the attribution model selected by the user, if no value is selected, default to full path
+SELECTEDVALUE(
+    'Attribution Model'[Code]
+)
+
+
+MEASURE _Measure[Selected attribution type] = 
+IF(
+    [Selected attribution model] <> BLANK(),
+    SELECTEDVALUE('Attribution Model'[Attribution model]),
+    SELECTEDVALUE('Attribution AI Type'[AI attribution type])
+)
+
+
+MEASURE _Measure[Selected cohort stage id] = SELECTEDVALUE('Cohort Stage'[Stage id])
+
+
+MEASURE _Measure[Selected currency] = 
+//if no value is found for the user selected currency, return "??"
+SELECTEDVALUE(
+    'User Selected Currency'[Currency],
+    "??"
+)
+
+
+MEASURE _Measure[Selected object] = 
+SELECTEDVALUE('Default Object'[Object])
+
+
+MEASURE _Measure[Selected opp count] = 
+SELECTEDVALUE('Parameter - Opp Counts'[Parameter - Opp Counts Fields])
+
+
+MEASURE _Measure[Selected revenue type] = 
+SELECTEDVALUE('Parameter - Revenue - Details Table'[Parameter - Revenue Fields])
+
+
+MEASURE _Measure[Selected stage rank] = 
+SELECTEDVALUE('Cohort Stage'[Stage rank])
+
+
+MEASURE _Measure[Simple ROI] = 
+//this measure formats the simple ROI amount for use in the single value tile
+CONCATENATE(
+    FORMAT([Simple ROI amount],"#,##0.00"),
+     " x"
+)
+
+
+MEASURE _Measure[Simple ROI amount] = 
+//simple roi is attributed revenue divided by cost, if cost is blank, return blank
+IF(
+    [Cost amount] = BLANK(),
+    BLANK(),
+    [Attributed revenue amount] / [Cost amount]
+)
+
+
+MEASURE _Measure[Start date] = 
+//this measure returns the start date for the date range a user has filtered to
+FIRSTDATE('Date'[Date])
+
+
+MEASURE _Measure[Title - Attribution Model/Type] = 
+IF(
+    [Selected ai attribution type] = 7 || [Selected ai attribution type] = 8,
+    "AI attribution type",
+    "Attribution model"
+)
+
+
+MEASURE _Measure[Title - Lead/Contact in stage] = 
+IF(
+    [Selected object] = "Lead",
+    "Leads in stage",
+    "Contacts in stage"
+)
+
+
+MEASURE _Measure[Title - Lead/Contact unique emails] = 
+IF(
+    [Selected object] = "Lead",
+    "Unique lead emails",
+    "Unique contact emails"
+)
+
+
+MEASURE _Measure[Title - Lead/Contact velocity by channel] = 
+IF(
+    [Selected object] = "Lead",
+    "Lead velocity by channel",
+    "Contact velocity by channel"
+)
+
+
+MEASURE _Measure[Title - Lead/Contact velocity by stage] = 
+IF(
+    [Selected object] = "Lead",
+    "Lead velocity by stage",
+    "Contact velocity by stage"
+)
+
+
+MEASURE _Measure[Title - Lead/Contact velocity over time] = 
+IF(
+    [Selected object] = "Lead",
+    "Lead velocity over time",
+    "Contact velocity over time"
+)
+
+
+MEASURE _Measure[Title - Touchpoints/People touched by channel] = 
+IF(SELECTEDVALUE('Parameter - Touchpoints vs People touched'[Parameter Order]) = 1, "People touched by channel", "Touchpoints by channel")
+
+
+MEASURE _Measure[Title - Visits/Visitors by channel] = 
+IF(SELECTEDVALUE('Parameter - Visits vs Visitors'[Parameter - Visits vs Visitors Order]) = 1, "Visits by channel", "Visitors by channel")
+
+
+MEASURE _Measure[Total deals] = 
+//this measure calculates the number of deals, regardless of if they are attributed or not.  a deal is defined as a closed - won opportunitiy, filter to only these values.
+CALCULATE(
+    DISTINCTCOUNT('Opportunity'[Opportunity id]),
+    Opportunity[Closed] = TRUE(),
+    Opportunity[Won] = TRUE()
+)
+
+
+MEASURE _Measure[Total deals drill] = 
+// this measured is used on the drill through to details page only.  filtering to closed - won opps is removed because it causes performance issues at the detail level, and the closed - won filters are passed at the page level, so not needed here.  the performance issue is likely due to the switching function that allows one detail page to be used for multiple measures.
+DISTINCTCOUNT(Opportunity[Opportunity id])
+
+
+MEASURE _Measure[Total new leads] = 
+CALCULATE(
+    DISTINCTCOUNT('Lead'[Lead id]),
+    //new leads are determined by the created date, filter date by created date (use this inactive relationship)
+    USERELATIONSHIP('Lead'[Lead created date],'Date'[Date])
+)
+
+
+MEASURE _Measure[Total new opportunities] = 
+//this measure counts the number of new opportunities regardless of if they have attribution or not
+CALCULATE(
+    DISTINCTCOUNT('Opportunity'[Opportunity id]),
+    //filter on created date to determine which ones are new (use this inactive relationship)
+    USERELATIONSHIP(Opportunity[Opportunity created date], 'Date'[Date]),
+    //disregard the relationship between bat and opportunitiy
+    CROSSFILTER('Buyer Attribution Touchpoint'[Opportunity id], Opportunity[Opportunity id], None),
+    //disregard the relationship between close date and date
+    CROSSFILTER(Opportunity[Opportunity close date], 'Date'[Date], None)
+)
+
+
+MEASURE _Measure[Total opportunity amount] = 
+VAR _corporate_currency = [Corporate currency]
+VAR _selected_currency = [Selected currency]
+RETURN
+//this measure converts the opportunity amount to the user selected currency
+//first convert the amount to the selected currency on a per row basis, then sum to get the total
+SUMX(
+    Opportunity,
+    //if a conversion rate for the original currency code cannot be found, use the opportunity amount as it exists in the table, otherwise convert the amount to the corporate currency by dividing by the conversion rate
+    IF(
+        LOOKUPVALUE(
+            'Conversion Rate'[Conversion rate],
+            'Conversion Rate'[Currency id], Opportunity[Currency id],
+            'Date'[Date],Opportunity[Opportunity close date],
+            'Conversion Rate'[Target currency code],_corporate_currency
+        ) = BLANK(),
+        Opportunity[Opportunity amount], 
+        Opportunity[Opportunity amount] / (LOOKUPVALUE(
+            'Conversion Rate'[Conversion rate],
+            'Conversion Rate'[Currency id], Opportunity[Currency id],
+            'Date'[Date],Opportunity[Opportunity close date],
+            'Conversion Rate'[Target currency code],_corporate_currency
+        ))
+    //multiply by the conversion rate for the user selected currency, this converts from the corporate currency to the user selected currency. if the conversion rate is missing, multiply by 1
+    ) *
+        LOOKUPVALUE(
+            'Conversion Rate'[Conversion rate],
+            'Conversion Rate'[Source currency code],_selected_currency,
+            'Date'[Date],Opportunity[Opportunity close date],
+            'Conversion Rate'[Target currency code],_corporate_currency,
+            1
+        )
+)
+
+
+MEASURE _Measure[Total revenue] = 
+//this measure is used to combine the revenue amount and the currency value to display it in the single value tiles
+CONCATENATE(
+    FORMAT(
+        IF(
+            ISBLANK([Total revenue amount])= TRUE(),0,[Total revenue amount])
+            ,"#,##0"),
+    " " & [Revenue currency]
+)
+
+
+MEASURE _Measure[Total revenue amount] = 
+//this measure calculates the revenue amount for all opportunities, not just those with attribution
+CALCULATE(
+    [Total opportunity amount],
+    //revenue is defined as amount from closed - won opportunities, filter to just these opps
+    Opportunity[Closed] = TRUE(),
+    Opportunity[Won] = TRUE()
+)
+
+
+MEASURE _Measure[Touchpoints] = 
+//count distinct touchpoints
+CALCULATE(
+    DISTINCTCOUNT('User Touchpoint'[User touchpoint id]),
+    //allow the date filter to filter this metric by touchpoint date (use this inactive relationship)
+    USERELATIONSHIP('User Touchpoint'[Touchpoint date],'Date'[Date])
+)
+
+
+MEASURE _Measure[Touchpoints per person] = 
+[Touchpoints]/[People touched]
+
+
+MEASURE _Measure[Touchpoints per person graphical scale] = 
+[Touchpoints per person] * 3
+//This measure used to set the scale correctly in the dual axis visulalisation for this metric.
+
+
+MEASURE _Measure[Unique emails from forms] = 
+//count unique emails from all form submits
+CALCULATE(
+    DISTINCTCOUNT('Form Submit'[Email]),
+    //filter based on the form date, the form page, the channel and campaign from the correlated session
+    USERELATIONSHIP('Form Submit'[Form date], 'Date'[Date]),
+    USERELATIONSHIP('Session'[Channel id],Channel[Channel id]),
+    USERELATIONSHIP('Session'[Campaign id],Campaign[Campaign id]),
+    USERELATIONSHIP('Form Submit'[Current page id],'Url'[Url id])
+)
+
+
+MEASURE _Measure[Unique lead/contact emails] = 
+VAR _start_date = [Start date]
+VAR _end_date = [End date]
+VAR _default_object = [Selected object]
+RETURN
+CALCULATE(
+    //use the defualt object to count lead emails or contact emails
+    IF(
+        _default_object = "Lead", 
+        DISTINCTCOUNTNOBLANK('Lead'[Email]), 
+        DISTINCTCOUNTNOBLANK(Contact[Email])
+    ),
+    USERELATIONSHIP('Lead/Contact Stage Transition'[Lead id], 'Lead'[Lead id]),
+    USERELATIONSHIP('Lead/Contact Stage Transition'[Contact id], 'Contact'[Contact id]),
+    FILTER(Stage,Stage[Stage status] = "Open"),
+    FILTER(Stage,Stage[Show stage] = TRUE()),
+    //transition must meet one of these criteria to be counted
+        //it transitioned into the stage during the selected date range
+        //OR it was in the stage and transitioned out of the stage during the selected date range
+        //OR it transitioned into the stage before the selected start date, and transitioned out after the selected end date
+        //OR it transitioned into the stage before the selected start date, and hasn't transitioned out (aka transition out date is blank)
+    FILTER('Lead/Contact Stage Transition',
+        ('Lead/Contact Stage Transition'[Transition in date] >= _start_date && 'Lead/Contact Stage Transition'[Transition in date] <= _end_date)
+        || ('Lead/Contact Stage Transition'[Transition out date] >= _start_date && 'Lead/Contact Stage Transition'[Transition out date] <= _end_date)
+        || ('Lead/Contact Stage Transition'[Transition in date] <= _start_date && 'Lead/Contact Stage Transition'[Transition out date] >= _end_date)
+        || ('Lead/Contact Stage Transition'[Transition in date] <= _start_date && 'Lead/Contact Stage Transition'[Transition out date] = BLANK())
+    )
+)
+
+
+MEASURE _Measure[Unrealized attributed pipeline revenue] = 
+//this measure concatenates the pipeline amount with the currency value, it is used to nicely display both in a single value tile
+CONCATENATE(
+    FORMAT(
+        IF(
+            ISBLANK([Unrealized attributed pipeline revenue amount])= TRUE(),0,[Unrealized attributed pipeline revenue amount])
+            ,"#,##0"),
+    " " & [Revenue currency]
+)
+
+
+MEASURE _Measure[Unrealized attributed pipeline revenue amount] = 
+CALCULATE(
+    //check which type of attribution model is selected, bat or aai
+    IF(
+        [Selected attribution model] <> BLANK(),
+        //use the selected attribution model and multiple this percentage by the opportunity amount on a row by row basis 
+        SUMX(
+            'Buyer Attribution Touchpoint',
+            [Total opportunity amount] * (
+                SWITCH(
+                    [Selected attribution model],
+                    1,'Buyer Attribution Touchpoint'[First touch percent],
+                    2,'Buyer Attribution Touchpoint'[Lead creation percent],
+                    3,'Buyer Attribution Touchpoint'[U shape percent],
+                    4,'Buyer Attribution Touchpoint'[W shape percent],
+                    5,'Buyer Attribution Touchpoint'[Full path percent],
+                    6,'Buyer Attribution Touchpoint'[Custom percent]
+                ) / 100
+            )
+        ),
+        //use the selected aai model type and multiple this percentage by the opportunity amount on a row by row basis
+        SUMX(
+            'Attribution AI Touchpoint',
+            [Total opportunity amount] * (
+                SWITCH(
+                    [Selected ai attribution type],
+                    7,'Attribution AI Touchpoint'[Incremental],
+                    8,'Attribution AI Touchpoint'[Influenced]
+                )
+            )
+        )
+    ),
+    //pipeline revenue is for open opportunities
+    Opportunity[Closed] = FALSE(),
+    //filter based on touchpoint date (use this inactive relationship)
+    USERELATIONSHIP('User Touchpoint'[Touchpoint date],'Date'[Date]),
+    USERELATIONSHIP('Attribution AI Touchpoint'[Touchpoint date],'Date'[Date]),
+    //ignore the active relationship between close date and date
+    CROSSFILTER(Opportunity[Opportunity close date], 'Date'[Date],None)
+)
+
+
+MEASURE _Measure[Velocity] = 
+CALCULATE(
+    AVERAGE('Lead/Contact Stage Transition'[Days in stage]),
+    //filter on the transition in date, use the inactive relationship
+    USERELATIONSHIP('Lead/Contact Stage Transition'[Transition in date],'Date'[Date]),
+    FILTER(Stage, Stage[Show stage])
+)
+
+
+MEASURE _Measure[Visitors] = 
+//count the number of visitors from sessions
+CALCULATE(
+    DISTINCTCOUNT('Session'[Visitor id]),
+    //filter based on the session date, channel, campaign, and landing page
+    USERELATIONSHIP('Session'[Session date],'Date'[Date]),
+    USERELATIONSHIP('Session'[Channel id],Channel[Channel id]),
+    USERELATIONSHIP('Session'[Campaign id],Campaign[Campaign id]),
+    USERELATIONSHIP('Session'[Landing page id],'Url'[Url id])
+)
+
+
+MEASURE _Measure[Visits] = 
+//count the number of visits
+CALCULATE(
+    DISTINCTCOUNT('Session'[Session id]),
+    //filter using the session date, channel, campaign, and landing page
+    USERELATIONSHIP('Session'[Session date],'Date'[Date]),
+    USERELATIONSHIP('Session'[Channel id],Channel[Channel id]),
+    USERELATIONSHIP('Session'[Campaign id],Campaign[Campaign id]),
+    USERELATIONSHIP('Session'[Landing page id],'Url'[Url id])
+)
+---- MODEL MEASURES END ----
+
